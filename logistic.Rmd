@@ -1,0 +1,154 @@
+---
+title: Continuous trait model
+output: html_document
+runtime: shiny
+---
+
+<style>
+    body .main-container {
+        max-width: none;
+    }
+</style>
+
+
+```{r echo=F, message=FALSE}
+library(shiny)
+library(tidyverse)
+library(ggpubr)
+library(treeio)
+library(ggtree)
+library(phytools)
+
+options(repos = BiocManager::repositories())
+
+logistic = function(A, K, slope, shift) {
+  function(x) {
+    A + (K - A) / (1 + exp(-slope * (x - shift)))
+  }
+}
+
+tree = read.tree("orthomam.nhx")
+
+leaf_traits =
+  read_tsv("orthomam_mass.tsv") %>%
+  filter(species %in% as_tibble(tree)$label) %>%
+  mutate(mass = log10(mass))
+leaf_traits_vec = leaf_traits$mass %>% set_names(leaf_traits$species)
+
+ancestral_traits = fastAnc(tree, leaf_traits_vec)
+anc_df = tibble(node = as.numeric(names(ancestral_traits)), mass = as.vector(ancestral_traits))
+
+annotated_tree =
+  full_join(tree, leaf_traits, by = c("label" = "species")) %>%
+  full_join(anc_df, by = "node") %>%
+  as_tibble() %>%
+  mutate(
+    mass = coalesce(mass.x, mass.y),
+    label = str_replace_all(label, "_", " "),
+  ) %>%
+  select(-mass.x, -mass.y) %>%
+  as.treedata()
+
+traits = annotated_tree %>%
+  as_tibble() %>%
+  pull(mass)
+root_value = as.vector(ancestral_traits[1])
+```
+
+```{r echo=F, message=F, warning=F}
+observeEvent(input$paramFree, {
+  if (input$paramFree == "constrained") {
+    updateSliderInput(inputId = "shift", value = root_value)
+    updateSliderInput(inputId = "slope", value = 1 / sd(traits))
+  }
+})
+
+fluidPage(
+  sidebarLayout(
+    sidebarPanel(
+      tags$h3("AA frequency asymptote"),
+      sliderInput(inputId = "start", label = "Start : low trait values", min = 0, max = 1, value = 0.9, step = 0.05),
+      sliderInput(inputId = "end", label = "End : high trait value", min = 0, max = 1, value = 0.1, step = 0.05),
+      hr(),
+      tags$h3("Sigmoid parameters"),
+      radioButtons(
+        inputId = "paramFree", label = "Mode",
+        choices = list(
+          "Free" = "free",
+          "Fit to trait values" = "constrained"
+        )
+      ),
+      conditionalPanel(
+        condition = "input.paramFree == 'free'",
+        sliderInput(
+          inputId = "slope", label = "Slope", min = 0, max = 100,
+          value = 1 / sd(traits), step = 0.5
+        ),
+        sliderInput(
+          inputId = "shift", label = "Shift (not bounded in the implementation)", min = -2, max = 10,
+          value = root_value, step = 0.1
+        ),
+      ),
+      conditionalPanel(
+        condition = "input.paramFree == 'constrained'",
+        sliderInput("slopeFactor", label = "Slope factor", min = 0.5, max = 10, value = 1, step = 0.5),
+        renderText({
+          sprintf("Slope = %f", input$slope * input$slopeFactor)
+        }),
+        renderText({
+          sprintf("Shift = %f", input$shift)
+        })
+      )
+    ),
+    mainPanel(
+      renderPlot(
+        {
+          slope = input$slope
+          if (input$paramFree != "free") {
+            slope = slope * input$slopeFactor
+          }
+          model = logistic(input$start, input$end, slope, input$shift)
+          trait_df = data.frame(trait = traits, y = model(traits))
+          x = seq(
+            min(c(input$shift, min(traits)) - 3),
+            max(c(input$shift, max(traits)) + 3),
+            0.01
+          )
+          plt = data.frame(x = x, y = model(x)) %>%
+            ggplot() +
+            geom_line(aes(x, y)) +
+            geom_point(data = trait_df, aes(trait, y), color = "red", alpha = 0.3) +
+            geom_density(data = trait_df, aes(trait), fill = "red", alpha = 0.3) +
+            rremove("legend") +
+            ylim(c(0, 1)) +
+            labs(
+              x = "Body mass (log10 grams)", y = "AA Frequency",
+              caption = "Red density is the distribution of body mass traits across species in this dataset. \
+              The frequency interpolated for each species trait is shown as a red dot on the sigmoid curve."
+            ) +
+            theme_pubclean()
+          plt
+        },
+        height = 500
+      )
+    )
+  )
+)
+```
+
+<center>
+```{r fig.height=10, fig.width=10, echo=F, message=F, warning=F}
+tree_plt = ggtree(annotated_tree, aes(color = mass), layout = "circular") +
+  geom_tiplab(size = 3.5) +
+  scale_color_continuous(type = "viridis", name = "log10(body mass)") +
+  theme(plot.margin = unit(c(0, 0, 0, 0), "mm")) +
+  xlim(NA, 0.2) +
+  guides(fill = guide_legend(override.aes = list(size = 0.1))) +
+  theme(
+    legend.title = element_text(size = 10),
+    legend.position = c(0.42, 0.5),
+    legend.background = element_rect(fill = "transparent"),
+  )
+tree_plt
+```
+</center>
